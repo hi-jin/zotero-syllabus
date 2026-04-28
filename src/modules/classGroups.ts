@@ -24,7 +24,7 @@ export function useSyllabusClassGroups(
 
     for (const __item of syllabusItems) {
       const item = __item.zoteroItem;
-      if (!item.isRegularItem()) continue;
+      if (!SyllabusManager.isAssignableItem(item)) continue;
       const assignments = __item.assignments;
 
       // If no assignments or all assignments are empty, add to further reading

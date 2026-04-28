@@ -50,7 +50,7 @@ export function useSyllabi(): SyllabusData[] {
         const items = syllabusData.itemIds
           .map((itemId) => {
             const item = getCachedItem(itemId);
-            if (!item || !item.isRegularItem()) {
+            if (!SyllabusManager.isAssignableItem(item)) {
               return null;
             }
             const assignments =
@@ -107,7 +107,7 @@ function createSyllabiStore() {
 
       const items = collection.getChildItems();
       const itemIds = items
-        .filter((item) => item.isRegularItem())
+        .filter((item) => SyllabusManager.isAssignableItem(item))
         .map((item) => item.id);
 
       syllabi.push({

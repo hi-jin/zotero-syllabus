@@ -48,7 +48,7 @@ export function createItemAssignmentsStore(
     }
 
     const item = getCachedItem(itemId);
-    if (!item || !item.isRegularItem()) {
+    if (!SyllabusManager.isAssignableItem(item)) {
       return SuperJSON.stringify({ assignments: [] });
     }
 

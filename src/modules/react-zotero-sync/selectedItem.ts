@@ -26,7 +26,7 @@ export function createSelectedItemStore() {
     const pane = ztoolkit.getGlobal("ZoteroPane");
     const selectedItems = pane?.getSelectedItems() || [];
     const newSelectedItemIds = selectedItems
-      .filter((item) => item.isRegularItem())
+      .filter((item) => SyllabusManager.isAssignableItem(item))
       .map((item) => item.id);
 
     // Check if items actually changed

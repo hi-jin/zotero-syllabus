@@ -17,6 +17,7 @@ export type ItemID = {
 
 export type CollectionItemsSnapshot = {
   items: ItemID[];
+  version?: number;
 };
 
 export function useZoteroCollectionItems(
@@ -64,23 +65,25 @@ export function useZoteroCollectionItems(
 export function createCollectionItemsStore(
   collectionId: number | GetByLibraryAndKeyArgs,
 ) {
+  let version = 0;
+
   function getSnapshot() {
     // Read directly from Zotero
     const collection =
       SyllabusManager.getCollectionFromIdentifier(collectionId);
     if (!collection) {
-      return SuperJSON.stringify({ items: [] });
+      return SuperJSON.stringify({ items: [], version });
     }
     const items: ItemID[] = collection
       .getChildItems()
-      .filter((item) => item.isRegularItem())
+      .filter((item) => SyllabusManager.isAssignableItem(item))
       .map((item) => {
         return {
           id: item.id,
           ...item.toJSON(),
         };
       });
-    return SuperJSON.stringify({ items });
+    return SuperJSON.stringify({ items, version });
   }
 
   function subscribe(onStoreChange: () => void) {
@@ -106,7 +109,7 @@ export function createCollectionItemsStore(
           const itemIds = ids as number[];
           for (const itemId of itemIds) {
             const item = getCachedItem(itemId);
-            if (item && item.isRegularItem()) {
+            if (SyllabusManager.isAssignableItem(item)) {
               const collections = item.getCollections();
               const collection =
                 SyllabusManager.getCollectionFromIdentifier(collectionId);
@@ -134,6 +137,7 @@ export function createCollectionItemsStore(
         }
 
         if (shouldUpdate) {
+          version++;
           onStoreChange();
         }
       },
@@ -145,9 +149,23 @@ export function createCollectionItemsStore(
       "collection",
     ]);
 
+    const prefKey = SyllabusManager.getPreferenceKey(
+      SyllabusManager.settingsKeys.COLLECTION_METADATA,
+    );
+
+    const prefObserverId = Zotero.Prefs.registerObserver(
+      prefKey,
+      () => {
+        version++;
+        onStoreChange();
+      },
+      true,
+    );
+
     // Return an unsubscribe fn
     return () => {
       Zotero.Notifier.unregisterObserver(notifierId);
+      Zotero.Prefs.unregisterObserver(prefObserverId);
     };
   }
 

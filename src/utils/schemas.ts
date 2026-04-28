@@ -120,6 +120,23 @@ const ItemSyllabusDataV3Schema = z.record(
   z.array(ItemSyllabusAssignmentEntity.latestSchema),
 );
 
+const AttachmentAssignmentsSchema = z
+  .record(z.string(), z.array(ItemSyllabusAssignmentEntity.latestSchema))
+  .optional()
+  .transform((assignments) => {
+    if (!assignments) return undefined;
+    const filtered: Record<
+      string,
+      z.infer<typeof ItemSyllabusAssignmentEntity.latestSchema>[]
+    > = {};
+    for (const [itemId, itemAssignments] of Object.entries(assignments)) {
+      if (Array.isArray(itemAssignments) && itemAssignments.length > 0) {
+        filtered[itemId] = itemAssignments;
+      }
+    }
+    return Object.keys(filtered).length > 0 ? filtered : undefined;
+  });
+
 /**
  * Get version from ItemSyllabusData
  */
@@ -363,6 +380,7 @@ export const SettingsSyllabusMetadataSchema = z.object({
   locked: z.boolean().optional().nullable(),
   links: z.array(z.string()).optional(),
   cslStyle: z.string().optional().nullable(),
+  attachmentAssignments: AttachmentAssignmentsSchema,
 });
 
 /**

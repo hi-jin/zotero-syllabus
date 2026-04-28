@@ -189,6 +189,20 @@ export class SyllabusManager {
     return iconMap[itemType] || "document";
   }
 
+  static isAssignableItem(
+    item: Zotero.Item | null | undefined,
+  ): item is Zotero.Item {
+    if (!item) {
+      return false;
+    }
+
+    try {
+      return item.isRegularItem() || item.isAttachment();
+    } catch {
+      return false;
+    }
+  }
+
   static SYLLABUS_DATA_KEY = "syllabus";
 
   static SYLLABUS_CLASS_NUMBER_FIELD = "syllabus-class-number";
@@ -1334,7 +1348,7 @@ export class SyllabusManager {
       if (!selectedCollection) return;
       const items = zoteroPane.getSelectedItems();
       for (const item of items) {
-        if (item.isRegularItem()) {
+        if (this.isAssignableItem(item)) {
           await this.applyToFirstAssignment(item, selectedCollection.id, {
             priority: priority || undefined,
           });
@@ -1433,7 +1447,7 @@ export class SyllabusManager {
         if (!selectedCollection) return;
         const items = zoteroPane.getSelectedItems();
         for (const item of items) {
-          if (item.isRegularItem()) {
+          if (this.isAssignableItem(item)) {
             await this.applyToFirstAssignment(item, selectedCollection.id, {
               classNumber,
             });
@@ -1490,7 +1504,7 @@ export class SyllabusManager {
       if (!selectedCollection) return;
       const items = zoteroPane.getSelectedItems();
       for (const item of items) {
-        if (item.isRegularItem()) {
+        if (this.isAssignableItem(item)) {
           await this.applyToFirstAssignment(item, selectedCollection.id, {
             status: status || undefined,
           });
@@ -1547,7 +1561,29 @@ export class SyllabusManager {
    * Now uses Zod validation with verzod for versioning
    */
   static getItemSyllabusData(item: Zotero.Item): ItemSyllabusData | undefined {
+    if (item.isAttachment()) {
+      return this.getAttachmentItemSyllabusData(item);
+    }
+
     return getCachedItemSyllabusData(item.id);
+  }
+
+  static getAttachmentItemSyllabusData(
+    item: Zotero.Item,
+  ): ItemSyllabusData | undefined {
+    const itemId = String(item.id);
+    const allData = this.getSettingsCollectionDictionaryData();
+    const itemData: ItemSyllabusData =
+      ItemSyllabusDataEntity.latestSchema.parse({});
+
+    for (const [collectionKeyStr, metadata] of Object.entries(allData)) {
+      const assignments = metadata.attachmentAssignments?.[itemId];
+      if (Array.isArray(assignments) && assignments.length > 0) {
+        itemData[collectionKeyStr] = assignments;
+      }
+    }
+
+    return Object.keys(itemData).length > 0 ? itemData : undefined;
   }
 
   static getItemSyllabusDataForCollection(
@@ -1581,6 +1617,11 @@ export class SyllabusManager {
     data: ItemSyllabusData,
     source: "page" | "item-pane" | "context-menu" | "background",
   ): Promise<void> {
+    if (item.isAttachment()) {
+      await this.setAttachmentItemData(item, data, source);
+      return;
+    }
+
     // Validate input data with Zod before saving
     const inputResult = ItemSyllabusDataEntity.safeParse(data);
     if (inputResult.type !== "ok") {
@@ -1626,6 +1667,65 @@ export class SyllabusManager {
     // Invalidate cache immediately after setting the extra field
     // This ensures the cache reflects the current state even before the item is saved
     invalidateCachedItemSyllabusData(item.id);
+    this.onItemUpdate(item, source);
+  }
+
+  static async setAttachmentItemData(
+    item: Zotero.Item,
+    data: ItemSyllabusData,
+    source: "page" | "item-pane" | "context-menu" | "background",
+  ): Promise<void> {
+    const inputResult = ItemSyllabusDataEntity.safeParse(data);
+    if (inputResult.type !== "ok") {
+      ztoolkit.log(
+        "[Zotero Syllabus] Error validating attachment syllabus data input before saving:",
+        inputResult.error,
+        "Input data:",
+        data,
+      );
+      return;
+    }
+
+    const itemId = String(item.id);
+    const allData = this.getSettingsCollectionDictionaryData();
+
+    for (const [collectionKeyStr, metadata] of Object.entries(allData)) {
+      if (!metadata.attachmentAssignments?.[itemId]) {
+        continue;
+      }
+
+      const nextAttachmentAssignments = {
+        ...metadata.attachmentAssignments,
+      };
+      delete nextAttachmentAssignments[itemId];
+      allData[collectionKeyStr] = {
+        ...metadata,
+        attachmentAssignments: nextAttachmentAssignments,
+      };
+    }
+
+    for (const [collectionKeyStr, assignments] of Object.entries(
+      inputResult.value,
+    )) {
+      const metadata =
+        allData[collectionKeyStr] || SettingsSyllabusMetadataSchema.parse({});
+      const nextAttachmentAssignments = {
+        ...(metadata.attachmentAssignments || {}),
+      };
+
+      if (assignments.length > 0) {
+        nextAttachmentAssignments[itemId] = assignments;
+      } else {
+        delete nextAttachmentAssignments[itemId];
+      }
+
+      allData[collectionKeyStr] = {
+        ...metadata,
+        attachmentAssignments: nextAttachmentAssignments,
+      };
+    }
+
+    this.setSettingsCollectionDictionaryData(allData, source);
     this.onItemUpdate(item, source);
   }
 
@@ -1685,7 +1785,7 @@ export class SyllabusManager {
     try {
       const items = collection.getChildItems();
       for (const item of items) {
-        if (item.isRegularItem()) {
+        if (this.isAssignableItem(item)) {
           // Get all class assignments for this item
           const assignments = this.getAllClassAssignments(item, collectionId);
           for (const assignment of assignments) {
@@ -2259,6 +2359,108 @@ export class SyllabusManager {
     );
   }
 
+  static async reorderClasses(
+    collectionId: number | GetByLibraryAndKeyArgs,
+    draggedClassNumber: number,
+    targetClassNumber: number,
+    insertBefore: boolean,
+    source: "page" | "item-pane" = "page",
+  ): Promise<void> {
+    if (draggedClassNumber === targetClassNumber) {
+      return;
+    }
+
+    const collection = this.getCollectionFromIdentifier(collectionId);
+    if (!collection) {
+      return;
+    }
+
+    const classNumbers = this.getFullClassNumberRange(collectionId);
+    if (
+      !classNumbers.includes(draggedClassNumber) ||
+      !classNumbers.includes(targetClassNumber)
+    ) {
+      return;
+    }
+
+    const reorderedClassNumbers = classNumbers.filter(
+      (classNumber) => classNumber !== draggedClassNumber,
+    );
+    const targetIndex = reorderedClassNumbers.indexOf(targetClassNumber);
+    if (targetIndex === -1) {
+      return;
+    }
+    reorderedClassNumbers.splice(
+      insertBefore ? targetIndex : targetIndex + 1,
+      0,
+      draggedClassNumber,
+    );
+
+    const classNumberMap = new Map<number, number>();
+    reorderedClassNumbers.forEach((oldClassNumber, index) => {
+      classNumberMap.set(oldClassNumber, classNumbers[index]);
+    });
+
+    for (const item of collection.getChildItems()) {
+      if (!this.isAssignableItem(item)) {
+        continue;
+      }
+
+      const data = this.getItemSyllabusData(item);
+      if (!data) {
+        continue;
+      }
+
+      const normalized = this.normalizeCollectionIdentifier(collectionId);
+      if (!normalized) {
+        return;
+      }
+      const collectionKeyStr = this.getCollectionReferenceString(
+        normalized.libraryID,
+        normalized.key,
+      );
+      const assignments = data[collectionKeyStr];
+      if (!Array.isArray(assignments) || assignments.length === 0) {
+        continue;
+      }
+
+      let changed = false;
+      const updatedAssignments = assignments.map((assignment) => {
+        const classNumber = assignment.classNumber;
+        if (classNumber === undefined || !classNumberMap.has(classNumber)) {
+          return assignment;
+        }
+
+        const nextClassNumber = classNumberMap.get(classNumber);
+        if (nextClassNumber === classNumber || nextClassNumber === undefined) {
+          return assignment;
+        }
+
+        changed = true;
+        return { ...assignment, classNumber: nextClassNumber };
+      });
+
+      if (changed) {
+        data[collectionKeyStr] = updatedAssignments;
+        await this.setItemData(item, data, source);
+      }
+    }
+
+    const metadata = this.getSyllabusMetadata(collectionId);
+    const previousClasses = metadata.classes || {};
+    const nextClasses: SettingsSyllabusMetadata["classes"] = {};
+
+    for (const [oldClassNumber, nextClassNumber] of classNumberMap.entries()) {
+      const previousClassMetadata = previousClasses[oldClassNumber];
+      if (previousClassMetadata) {
+        nextClasses[nextClassNumber] = previousClassMetadata;
+      }
+    }
+
+    metadata.classes = nextClasses;
+    await this.setCollectionMetadata(collectionId, metadata, source);
+  }
+
   static getSettingsCollectionDictionaryData(): SettingsCollectionDictionaryData {
     const prefKey = SyllabusManager.getPreferenceKey(
       SyllabusSettingsKey.COLLECTION_METADATA,
@@ -2274,7 +2476,7 @@ export class SyllabusManager {
 
   static setSettingsCollectionDictionaryData(
     metadata: SettingsCollectionDictionaryData,
-    source: "page" | "item-pane" | "background",
+    source: "page" | "item-pane" | "context-menu" | "background",
     emitChange: boolean = true,
   ) {
     const inputResult =
@@ -2287,6 +2489,7 @@ export class SyllabusManager {
       SyllabusSettingsKey.COLLECTION_METADATA,
     );
     Zotero.Prefs.set(prefKey, JSON.stringify(inputResult.data), true);
+    zoteroCache.invalidatePref(prefKey);
     if (emitChange) {
       // Preference change notifications are handled by Zotero.Prefs.registerObserver
       // if (source !== "item-pane") this.reloadItemPane();
@@ -2973,7 +3176,7 @@ export class SyllabusManager {
       const items = collection.getChildItems();
 
       for (const item of items) {
-        if (!item.isRegularItem()) continue;
+        if (!this.isAssignableItem(item)) continue;
 
         const assignments = this.getAllClassAssignments(item, collectionId);
 
@@ -3224,7 +3427,7 @@ export class SyllabusManager {
             // Verify items are in the collection
             const collectionItemIDs = targetCollection
               .getChildItems()
-              .filter((item) => item.isRegularItem())
+              .filter((item) => this.isAssignableItem(item))
               .map((item) => item.id);
 
             const itemsInCollection = itemIDs.filter((id: number) =>

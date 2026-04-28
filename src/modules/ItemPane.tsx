@@ -171,22 +171,22 @@ function ItemPaneContent({
           });
         }
       }
+    }
 
-      if (
-        !!currentCollection &&
-        // not already in the list
-        !collectionsWithAssignments.some(
-          (c) => c.collectionId === currentCollection!.id,
-        )
-      ) {
-        // Display this collection so assignments can be added to it
-        collectionsWithAssignments.push({
-          collection: currentCollection!,
-          collectionId: currentCollection.id,
-          collectionName: currentCollection.name,
-          assignments: [],
-        });
-      }
+    if (
+      !!currentCollection &&
+      // not already in the list
+      !collectionsWithAssignments.some(
+        (c) => c.collectionId === currentCollection!.id,
+      )
+    ) {
+      // Display this collection so assignments can be added to it
+      collectionsWithAssignments.push({
+        collection: currentCollection!,
+        collectionId: currentCollection.id,
+        collectionName: currentCollection.name,
+        assignments: [],
+      });
     }
 
     // Sort so current collection is first, then alphabetically by name

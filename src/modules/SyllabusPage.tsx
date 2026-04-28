@@ -56,6 +56,8 @@ import {
   Trash2,
   Menu,
   ListTodo,
+  RotateCcw,
+  GripVertical,
 } from "lucide-preact";
 import { TableOfContents } from "./TableOfContents";
 import { saveToFile } from "../utils/file";
@@ -281,7 +283,7 @@ export function SyllabusPage({ collectionId }: SyllabusPageProps) {
           const itemId = parseInt(identifierStr.replace("item:", ""), 10);
           if (!isNaN(itemId)) {
             const item = getCachedItem(itemId);
-            if (item && item.isRegularItem()) {
+            if (SyllabusManager.isAssignableItem(item)) {
               await itemProcessor(item);
               itemsToSave.add(item);
             }
@@ -647,7 +649,7 @@ export function SyllabusPage({ collectionId }: SyllabusPageProps) {
             }
           }
 
-          if (!draggedItem || !draggedItem.isRegularItem()) continue;
+          if (!SyllabusManager.isAssignableItem(draggedItem)) continue;
 
           // Update assignment to target class
           await SyllabusManager.updateClassAssignment(
@@ -687,7 +689,7 @@ export function SyllabusPage({ collectionId }: SyllabusPageProps) {
           // This item is either unassigned or has assignments in a different class
           try {
             const item = getCachedItem(itemId);
-            if (item && item.isRegularItem()) {
+            if (SyllabusManager.isAssignableItem(item)) {
               // Check if item has any assignments for this collection
               const syllabusData = SyllabusManager.getItemSyllabusData(item);
               const collection = getCachedCollectionById(collectionId);
@@ -839,7 +841,7 @@ export function SyllabusPage({ collectionId }: SyllabusPageProps) {
     if (isNaN(itemId)) return;
 
     const draggedItem = getCachedItem(itemId);
-    if (!draggedItem || !draggedItem.isRegularItem()) return;
+    if (!SyllabusManager.isAssignableItem(draggedItem)) return;
 
     // Get source assignment ID from drag data (if dragging from a class)
     const sourceAssignmentId = e.dataTransfer.getData(
@@ -1164,6 +1166,24 @@ export function SyllabusPage({ collectionId }: SyllabusPageProps) {
       e.currentTarget.dataset.dropzoneActive = "false";
     }
   };
+
+  const handleClassReorder = useCallback(
+    async (
+      draggedClassNumber: number,
+      targetClassNumber: number,
+      insertBefore: boolean,
+    ) => {
+      await SyllabusManager.reorderClasses(
+        collectionId,
+        draggedClassNumber,
+        targetClassNumber,
+        insertBefore,
+        "page",
+      );
+      setItemOrderVersion((v) => v + 1);
+    },
+    [collectionId],
+  );
 
   const nextClassNumber = useMemo(() => {
     const classNumbers = SyllabusManager.getFullClassNumberRange(collectionId);
@@ -1816,6 +1836,7 @@ export function SyllabusPage({ collectionId }: SyllabusPageProps) {
                 onDrop={handleDrop}
                 onDragOver={handleDragOver}
                 onDragLeave={handleDragLeave}
+                onClassReorder={handleClassReorder}
                 compactMode={compactMode}
                 readerMode={readerMode}
                 isLocked={isLocked}
@@ -1970,6 +1991,11 @@ interface ClassGroupComponentProps {
   ) => Promise<void>;
   onDragOver: (e: JSX.TargetedDragEvent<HTMLElement>) => void;
   onDragLeave: (e: JSX.TargetedDragEvent<HTMLElement>) => void;
+  onClassReorder: (
+    draggedClassNumber: number,
+    targetClassNumber: number,
+    insertBefore: boolean,
+  ) => Promise<void>;
   compactMode?: boolean;
   readerMode?: boolean;
   isLocked?: boolean;
@@ -2009,6 +2035,7 @@ function ClassGroupComponent({
   onDrop,
   onDragOver,
   onDragLeave,
+  onClassReorder,
   compactMode = false,
   readerMode = false,
   isLocked = false,
@@ -2021,6 +2048,16 @@ function ClassGroupComponent({
   onDuplicate,
 }: ClassGroupComponentProps) {
   const selectedItemIds = useZoteroSelectedItemIds();
+  const [classDropPosition, setClassDropPosition] = useState<
+    "before" | "after" | null
+  >(null);
+
+  const classDragDataType = "application/x-syllabus-class-number";
+
+  const hasClassDragData = (e: JSX.TargetedDragEvent<HTMLElement>) => {
+    if (!e.dataTransfer) return false;
+    return Array.from(e.dataTransfer.types).includes(classDragDataType);
+  };
 
   // Get nomenclature for this collection
   const { singularCapitalized } =
@@ -2092,6 +2129,62 @@ function ClassGroupComponent({
     }
   };
 
+  const handleClassDragStart = (e: JSX.TargetedDragEvent<HTMLElement>) => {
+    if (!classNumber || isLocked) return;
+    e.stopPropagation();
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData(classDragDataType, String(classNumber));
+    }
+  };
+
+  const handleClassDragOver = (e: JSX.TargetedDragEvent<HTMLElement>) => {
+    if (!classNumber || isLocked || !hasClassDragData(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = "move";
+    }
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const position =
+      e.clientY < rect.top + rect.height / 2 ? "before" : "after";
+    setClassDropPosition(position);
+  };
+
+  const handleClassDragLeave = (e: JSX.TargetedDragEvent<HTMLElement>) => {
+    if (!hasClassDragData(e)) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = e.clientX;
+    const y = e.clientY;
+    if (x < rect.left || x > rect.right || y < rect.top || y > rect.bottom) {
+      setClassDropPosition(null);
+    }
+  };
+
+  const handleClassDrop = async (e: JSX.TargetedDragEvent<HTMLElement>) => {
+    if (!classNumber || isLocked || !hasClassDragData(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+
+    const draggedClassNumber = parseInt(
+      e.dataTransfer?.getData(classDragDataType) || "",
+      10,
+    );
+    const insertBefore = classDropPosition !== "after";
+    setClassDropPosition(null);
+
+    if (
+      isNaN(draggedClassNumber) ||
+      draggedClassNumber === classNumber ||
+      !onClassReorder
+    ) {
+      return;
+    }
+
+    await onClassReorder(draggedClassNumber, classNumber, insertBefore);
+  };
+
   // Generate ID for TOC navigation
   const tocId = classNumber ? `toc-class-${classNumber}` : null;
 
@@ -2135,11 +2228,40 @@ function ClassGroupComponent({
                 )}
                 <div
                   className={twMerge(
-                    "syllabus-class-header shrink-0 uppercase text-secondary font-semibold",
+                    "syllabus-class-header shrink-0 uppercase text-secondary font-semibold rounded px-1 -mx-1 inline-flex items-center gap-1 transition-colors",
+                    !isLocked &&
+                      "cursor-grab active:cursor-grabbing hover:bg-quinary hover:text-primary",
                     compactMode ? "text-sm" : "text-lg",
                   )}
+                  draggable={!isLocked}
+                  onDragStart={handleClassDragStart}
+                  onDragOver={handleClassDragOver}
+                  onDragLeave={handleClassDragLeave}
+                  onDrop={handleClassDrop}
+                  onDragEnd={() => setClassDropPosition(null)}
+                  style={{
+                    boxShadow:
+                      classDropPosition === "before"
+                        ? "0 -2px 0 var(--color-accent-blue)"
+                        : classDropPosition === "after"
+                          ? "0 2px 0 var(--color-accent-blue)"
+                          : undefined,
+                  }}
+                  title={
+                    isLocked
+                      ? undefined
+                      : `Drag to reorder and renumber ${singularCapitalized.toLowerCase()}s`
+                  }
                 >
-                  {singularCapitalized} {classNumber}
+                  {!isLocked && (
+                    <GripVertical
+                      size={14}
+                      className="text-tertiary in-[.print]:hidden"
+                    />
+                  )}
+                  <span>
+                    {singularCapitalized} {classNumber}
+                  </span>
                 </div>
                 <div
                   className={twMerge(
@@ -2183,16 +2305,30 @@ function ClassGroupComponent({
                   )}
                   {!isLocked && (
                     <>
-                      {hasManualOrder && (
-                        <button
-                          className="bg-transparent border-none rounded transition-all duration-200 cursor-pointer hover:bg-quinary text-secondary hover:text-primary inline-flex flex-row items-center justify-center w-8 h-8"
-                          onClick={handleResetSortOrder}
-                          title="Reset sort order"
-                          aria-label="Reset sort order"
-                        >
-                          <div className="text-lg text-center">⇅</div>
-                        </button>
-                      )}
+                      <button
+                        className={twMerge(
+                          "bg-transparent border-none rounded transition-all duration-200 inline-flex flex-row items-center justify-center w-8 h-8",
+                          hasManualOrder
+                            ? "cursor-pointer hover:bg-quinary text-secondary hover:text-primary"
+                            : "cursor-default text-tertiary opacity-40",
+                        )}
+                        onClick={
+                          hasManualOrder ? handleResetSortOrder : undefined
+                        }
+                        disabled={!hasManualOrder}
+                        title={
+                          hasManualOrder
+                            ? "Reset custom item order"
+                            : "No custom item order to reset"
+                        }
+                        aria-label={
+                          hasManualOrder
+                            ? "Reset custom item order"
+                            : "No custom item order to reset"
+                        }
+                      >
+                        <RotateCcw size={16} />
+                      </button>
                       <button
                         className="bg-transparent border-none rounded transition-all duration-200 cursor-pointer hover:bg-red-500/15 text-secondary hover:text-red-400 inline-flex flex-row items-center justify-center w-8 h-8"
                         onClick={handleDeleteClass}
@@ -2392,6 +2528,7 @@ function ReadingDateInput({
 function TextInput({
   initialValue,
   onSave,
+  onCommit,
   placeholder,
   elementType = "input",
   emptyBehavior = "reset",
@@ -2399,10 +2536,14 @@ function TextInput({
   containerClassName,
   fieldSizing = "content",
   readOnly = false,
+  onChange: externalOnChange,
+  onBlur: externalOnBlur,
+  onKeyDown: externalOnKeyDown,
   ...elementProps
 }: {
   initialValue: string;
   onSave: (value: string) => void | Promise<void>;
+  onCommit?: (value: string) => void;
   placeholder?: string;
   emptyBehavior?: "reset" | "delete";
   elementType?: "input" | "textarea";
@@ -2413,8 +2554,19 @@ function TextInput({
 } & JSX.HTMLAttributes<HTMLInputElement | HTMLTextAreaElement>) {
   const [value, setValue] = useState(initialValue);
 
+  function getSaveValue(value: string) {
+    return emptyBehavior === "reset" ? value || initialValue : value;
+  }
+
   function save(value: string) {
-    onSave(emptyBehavior === "reset" ? value || initialValue : value);
+    const saveValue = getSaveValue(value);
+    onSave(saveValue);
+    return saveValue;
+  }
+
+  function commit(value: string) {
+    const saveValue = save(value);
+    onCommit?.(saveValue);
   }
 
   useEffect(() => {
@@ -2470,9 +2622,18 @@ function TextInput({
         disabled: readOnly,
         onChange: readOnly
           ? undefined
-          : (e: JSX.TargetedEvent<HTMLInputElement | HTMLTextAreaElement>) =>
-              setValue((e.target as HTMLInputElement).value),
-        onBlur: readOnly ? undefined : () => save(value),
+          : (e: JSX.TargetedEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+              setValue(e.currentTarget.value);
+              externalOnChange?.(e);
+            },
+        onBlur: readOnly
+          ? undefined
+          : (
+              e: JSX.TargetedFocusEvent<HTMLInputElement | HTMLTextAreaElement>,
+            ) => {
+              save(e.currentTarget.value);
+              externalOnBlur?.(e);
+            },
         onKeyDown: readOnly
           ? undefined
           : (
@@ -2480,10 +2641,11 @@ function TextInput({
                 HTMLInputElement | HTMLTextAreaElement
               >,
             ) => {
+              externalOnKeyDown?.(e);
               if (e.key === "Escape" || e.key === "Enter") {
                 e.preventDefault();
+                commit(e.currentTarget.value);
                 e.currentTarget.blur();
-                save(value);
               }
             },
         onSelect: readOnly
@@ -2532,6 +2694,72 @@ function TextInput({
       {el}
     </div>
   );
+}
+
+type ViewableAttachmentType =
+  | "pdf"
+  | "snapshot"
+  | "epub"
+  | "html"
+  | "doc"
+  | "txt"
+  | "zip"
+  | "file";
+
+type ViewableAttachment = {
+  item: Zotero.Item;
+  type: ViewableAttachmentType;
+};
+
+function getViewableAttachment(
+  attachment: Zotero.Item | null | undefined,
+): ViewableAttachment | null {
+  if (!attachment?.isAttachment()) {
+    return null;
+  }
+
+  const contentType = attachment.attachmentContentType || "";
+  const linkMode = attachment.attachmentLinkMode;
+  const path = attachment.attachmentPath?.toLowerCase() || "";
+
+  if (contentType === "application/pdf" || path.endsWith(".pdf")) {
+    return { item: attachment, type: "pdf" };
+  }
+
+  if (linkMode === 3) {
+    return { item: attachment, type: "snapshot" };
+  }
+
+  if (
+    contentType === "application/epub+zip" ||
+    contentType === "application/epub" ||
+    path.endsWith(".epub")
+  ) {
+    return { item: attachment, type: "epub" };
+  }
+
+  if (
+    contentType === "text/html" ||
+    path.endsWith(".html") ||
+    path.endsWith(".htm")
+  ) {
+    return { item: attachment, type: "html" };
+  }
+
+  if (linkMode === 0 || linkMode === 1) {
+    if (path.endsWith(".doc") || path.endsWith(".docx")) {
+      return { item: attachment, type: "doc" };
+    }
+    if (path.endsWith(".txt") || contentType === "text/plain") {
+      return { item: attachment, type: "txt" };
+    }
+    if (path.endsWith(".zip") || contentType === "application/zip") {
+      return { item: attachment, type: "zip" };
+    }
+    return { item: attachment, type: "file" };
+  }
+
+  return null;
 }
 
 export function SyllabusItemCard({
@@ -2613,17 +2841,19 @@ export function SyllabusItemCard({
   // const is
 
   const classInstruction = assignment?.classInstruction || "";
-  const title = item.getField("title") || "Untitled";
+  const title = item.getField("title") || item.getDisplayTitle() || "Untitled";
   const itemTypeLabel = Zotero.ItemTypes.getLocalizedString(item.itemType);
-  const creator = item.getCreators().length > 0 ? item.getCreator(0) : null;
+  const creators = item.isRegularItem() ? item.getCreators() : [];
+  const creator = creators.length > 0 ? item.getCreator(0) : null;
   const author =
     item.firstCreator ||
     (creator && typeof creator !== "boolean"
       ? `${creator.firstName || ""} ${creator.lastName || ""}`.trim()
       : "");
-  const date = item.getField("date") || "";
-  const publicationName =
-    item.getField("publicationTitle") || item.getField("bookTitle") || "";
+  const date = item.isRegularItem() ? item.getField("date") || "" : "";
+  const publicationName = item.isRegularItem()
+    ? item.getField("publicationTitle") || item.getField("bookTitle") || ""
+    : "";
   const url = item.getField("url") || "";
   const [syllabusMetadata] = useZoteroSyllabusMetadata(collectionId);
   const readingTime = getReadingTimeSync(item, { roundUp: true });
@@ -2644,87 +2874,32 @@ export function SyllabusItemCard({
   useEffect(() => {
     (async () => {
       if (slim) return;
-      if (getPref("showBibliography")) {
+      if (getPref("showBibliography") && item.isRegularItem()) {
         const cslStyle = syllabusMetadata.cslStyle || null;
         const ref = await generateBibliographicReference(item, true, cslStyle);
         setBibliographicReference(ref || "");
+      } else {
+        setBibliographicReference("");
       }
     })();
   }, [item, slim, syllabusMetadata.cslStyle]);
 
   const viewableAttachments = useMemo(() => {
-    return item
-      .getAttachments()
+    const attachmentIds = item.isAttachment()
+      ? [item.id]
+      : item.getAttachments();
+
+    return attachmentIds
       .map((attId) => {
         try {
           const att = getCachedItem(attId);
-          if (att && att.isAttachment()) {
-            const contentType = att.attachmentContentType || "";
-            const linkMode = att.attachmentLinkMode;
-            const path = att.attachmentPath?.toLowerCase() || "";
-
-            // PDF
-            if (contentType === "application/pdf" || path.endsWith(".pdf")) {
-              return { item: att, type: "pdf" as const };
-            }
-
-            // Snapshot (linkMode 3)
-            if (linkMode === 3) {
-              return { item: att, type: "snapshot" as const };
-            }
-
-            // EPUB
-            if (
-              contentType === "application/epub+zip" ||
-              contentType === "application/epub" ||
-              path.endsWith(".epub")
-            ) {
-              return { item: att, type: "epub" as const };
-            }
-
-            // HTML
-            if (
-              contentType === "text/html" ||
-              path.endsWith(".html") ||
-              path.endsWith(".htm")
-            ) {
-              return { item: att, type: "html" as const };
-            }
-
-            // Other file attachments (not linked files)
-            // linkMode 0 = imported file, 1 = linked file, 2 = imported URL, 3 = snapshot
-            if (linkMode === 0 || linkMode === 1) {
-              // Determine type from extension or content type
-              if (path.endsWith(".doc") || path.endsWith(".docx")) {
-                return { item: att, type: "doc" as const };
-              }
-              if (path.endsWith(".txt") || contentType === "text/plain") {
-                return { item: att, type: "txt" as const };
-              }
-              if (path.endsWith(".zip") || contentType === "application/zip") {
-                return { item: att, type: "zip" as const };
-              }
-              // Generic file attachment
-              return { item: att, type: "file" as const };
-            }
-          }
+          return getViewableAttachment(att);
         } catch {
           // Continue
         }
         return null;
       })
-      .filter(Boolean) as Array<{
-      item: Zotero.Item;
-      type:
-        | "pdf"
-        | "snapshot"
-        | "epub"
-        | "html"
-        | "doc"
-        | "txt"
-        | "zip"
-        | "file";
-    }>;
+      .filter(Boolean) as ViewableAttachment[];
   }, [item, slim]);
 
   // Find snapshot attachment and get its URL
@@ -2885,6 +3060,28 @@ export function SyllabusItemCard({
     item: Zotero.Item,
     __e?: JSX.TargetedMouseEvent<HTMLElement>,
   ) {
+    if (item.isAttachment()) {
+      try {
+        const pane = ztoolkit.getGlobal("ZoteroPane");
+        pane.viewPDF(item.id, { page: 1 } as any);
+      } catch {
+        try {
+          const file = item.getFilePath();
+          if (file) {
+            Zotero.File.pathToFile(file).reveal();
+          } else {
+            const attachmentUrl = item.getField("url");
+            if (attachmentUrl) {
+              Zotero.launchURL(attachmentUrl);
+            }
+          }
+        } catch (fileErr) {
+          ztoolkit.log("Error opening attachment:", fileErr);
+        }
+      }
+      return;
+    }
+
     const url = item.getField("url");
     const attachments = item.getAttachments();
     const viewableAttachment = attachments.find((attId) => {
@@ -2903,10 +3100,9 @@ export function SyllabusItemCard({
     }
   }
 
-  const handleAttachmentClick = async (viewableAttachment?: {
-    item: Zotero.Item;
-    type: "pdf" | "snapshot" | "epub" | "html" | "doc" | "txt" | "zip" | "file";
-  }) => {
+  const handleAttachmentClick = async (
+    viewableAttachment?: ViewableAttachment,
+  ) => {
     if (!viewableAttachment) return;
 
     try {
@@ -3184,17 +3380,7 @@ export function SyllabusItemCard({
         >
           {/* Attachment buttons */}
           {viewableAttachments.map((viewableAttachment) => {
-            const getAttachmentLabel = (
-              type:
-                | "pdf"
-                | "snapshot"
-                | "epub"
-                | "html"
-                | "doc"
-                | "txt"
-                | "zip"
-                | "file",
-            ) => {
+            const getAttachmentLabel = (type: ViewableAttachmentType) => {
               switch (type) {
                 case "pdf":
                   return "PDF";
@@ -3217,17 +3403,7 @@ export function SyllabusItemCard({
               }
             };
 
-            const getAttachmentIconType = (
-              type:
-                | "pdf"
-                | "snapshot"
-                | "epub"
-                | "html"
-                | "doc"
-                | "txt"
-                | "zip"
-                | "file",
-            ) => {
+            const getAttachmentIconType = (type: ViewableAttachmentType) => {
               switch (type) {
                 case "pdf":
                   return "attachmentPDF";
@@ -3553,17 +3729,37 @@ export function Bibliography({
   compactMode?: boolean;
   cslStyle?: string | null;
 }) {
+  const bibliographyItems = useMemo(
+    () => items.filter((item) => item.isRegularItem()),
+    [items],
+  );
   const [bibliographicReference, setBibliographicReference] = useState(
-    generateFallbackBibliographicReference(items),
+    generateFallbackBibliographicReference(bibliographyItems),
   );
   useEffect(() => {
+    if (bibliographyItems.length === 0) {
+      setBibliographicReference("");
+      return;
+    }
+
+    setBibliographicReference(
+      generateFallbackBibliographicReference(bibliographyItems),
+    );
     (async () => {
-      const ref = await generateBibliographicReference(items, false, cslStyle);
+      const ref = await generateBibliographicReference(
+        bibliographyItems,
+        false,
+        cslStyle,
+      );
       if (ref) {
         setBibliographicReference(ref);
       }
     })();
-  }, [items, cslStyle]);
+  }, [bibliographyItems, cslStyle]);
+
+  if (bibliographyItems.length === 0 || !bibliographicReference) {
+    return null;
+  }
 
   return (
     <div>
@@ -3675,14 +3871,12 @@ function LinksSection({
                   <TextInput
                     initialValue={editingValues[index] || link}
                     onSave={(value) => handleSaveLink(index, value)}
+                    onCommit={() => {
+                      setEditingIndex(null);
+                      setEditingValues({});
+                    }}
                     placeholder="Enter URL..."
                     className="flex-1 w-full"
-                    onKeyDown={(e) => {
-                      if (e.key === "Escape" || e.key === "Enter") {
-                        setEditingIndex(null);
-                        setEditingValues({});
-                      }
-                    }}
                   />
                   <Trash2
                     size={16}
